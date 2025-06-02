@@ -1,0 +1,87 @@
+# app.py
+from flask import Flask, request, jsonify
+import spacy
+import pdfplumber
+import psycopg2
+import re
+
+app = Flask(__name__)
+nlp = spacy.load("en_core_web_sm")
+
+# Connect to PostgreSQL (adjust credentials accordingly)
+conn = psycopg2.connect(
+    dbname="resumedb",
+    user="postgres",
+    password="password",
+    host="localhost"
+)
+cur = conn.cursor()
+
+# Create table if not exists
+cur.execute("""
+CREATE TABLE IF NOT EXISTS candidates (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    skills TEXT,
+    education TEXT
+)
+""")
+conn.commit()
+
+def extract_text_from_pdf(file_path):
+    text = ""
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text() + "\n"
+    return text
+
+def extract_name(text):
+    doc = nlp(text)
+    for ent in doc.ents:
+        if ent.label_ == "PERSON":
+            return ent.text
+    return "Unknown"
+
+def extract_skills(text):
+    # Simple skill keywords list
+    skills_list = ["Python", "Java", "C++", "SQL", "Flask", "Django", "Machine Learning", "NLP", "Docker"]
+    found_skills = [skill for skill in skills_list if skill.lower() in text.lower()]
+    return ", ".join(found_skills)
+
+def extract_education(text):
+    # Simple regex for education degrees
+    edu_patterns = r"(Bachelor|Master|B\.Sc|M\.Sc|Ph\.D|BA|MA|Bachelors|Masters)[^\n]*"
+    matches = re.findall(edu_patterns, text, re.IGNORECASE)
+    return ", ".join(set(matches)) if matches else "Not found"
+
+@app.route('/upload', methods=['POST'])
+def upload_resume():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+    file_path = f"./temp_{file.filename}"
+    file.save(file_path)
+
+    text = extract_text_from_pdf(file_path)
+    name = extract_name(text)
+    skills = extract_skills(text)
+    education = extract_education(text)
+
+    cur.execute(
+        "INSERT INTO candidates (name, skills, education) VALUES (%s, %s, %s) RETURNING id",
+        (name, skills, education)
+    )
+    candidate_id = cur.fetchone()[0]
+    conn.commit()
+
+    return jsonify({
+        "id": candidate_id,
+        "name": name,
+        "skills": skills,
+        "education": education
+    })
+
+if __name__ == '__main__':
+    app.run(debug=True)
