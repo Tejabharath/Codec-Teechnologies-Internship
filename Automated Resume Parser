@@ -8,7 +8,7 @@ import re
 app = Flask(__name__)
 nlp = spacy.load("en_core_web_sm")
 
-# Connect to PostgreSQL (adjust credentials accordingly)
+# Connect to PostgreSQL
 conn = psycopg2.connect(
     dbname="resumedb",
     user="postgres",
