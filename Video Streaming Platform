@@ -1,0 +1,97 @@
+# app.py
+import os
+import boto3
+from flask import Flask, request, render_template_string, redirect, url_for
+import sqlite3
+from werkzeug.utils import secure_filename
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = './uploads'
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# Initialize SQLite
+conn = sqlite3.connect('videos.db', check_same_thread=False)
+cur = conn.cursor()
+cur.execute('''
+CREATE TABLE IF NOT EXISTS videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT,
+    s3_key TEXT
+)
+''')
+conn.commit()
+
+# AWS S3 setup 
+s3 = boto3.client('s3')
+BUCKET_NAME = 'your-s3-bucket-name'
+
+# Simple HTML dashboard template
+dashboard_html = '''
+<h1>Video Dashboard</h1>
+<form method="POST" action="/upload" enctype="multipart/form-data">
+  <input type="file" name="video" required>
+  <button type="submit">Upload Video</button>
+</form>
+<h2>Uploaded Videos</h2>
+<ul>
+  {% for video in videos %}
+    <li><a href="{{ url_for('stream_video', video_id=video[0]) }}">{{ video[1] }}</a></li>
+  {% endfor %}
+</ul>
+'''
+
+@app.route('/')
+def dashboard():
+    cur.execute("SELECT id, filename FROM videos")
+    videos = cur.fetchall()
+    return render_template_string(dashboard_html, videos=videos)
+
+@app.route('/upload', methods=['POST'])
+def upload():
+    if 'video' not in request.files:
+        return "No video file", 400
+    file = request.files['video']
+    if file.filename == '':
+        return "No selected file", 400
+    filename = secure_filename(file.filename)
+    local_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(local_path)
+
+    # Optional: Use FFmpeg here for processing (skipped for brevity)
+
+    # Upload to S3
+    s3_key = f"videos/{filename}"
+    s3.upload_file(local_path, BUCKET_NAME, s3_key)
+
+    # Save record in DB
+    cur.execute("INSERT INTO videos (filename, s3_key) VALUES (?, ?)", (filename, s3_key))
+    conn.commit()
+
+    # Remove local file after upload
+    os.remove(local_path)
+
+    return redirect(url_for('dashboard'))
+
+@app.route('/stream/<int:video_id>')
+def stream_video(video_id):
+    cur.execute("SELECT s3_key FROM videos WHERE id=?", (video_id,))
+    row = cur.fetchone()
+    if not row:
+        return "Video not found", 404
+    s3_key = row[0]
+
+    # Generate a presigned URL for streaming
+    url = s3.generate_presigned_url('get_object',
+                                    Params={'Bucket': BUCKET_NAME, 'Key': s3_key},
+                                    ExpiresIn=3600)
+    return f'''
+    <h1>Streaming Video</h1>
+    <video width="640" height="480" controls>
+      <source src="{url}" type="video/mp4">
+      Your browser does not support the video tag.
+    </video>
+    <br><a href="/">Back to Dashboard</a>
+    '''
+
+if __name__ == '__main__':
+    app.run(debug=True)
